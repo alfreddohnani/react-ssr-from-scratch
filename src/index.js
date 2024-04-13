@@ -1,26 +1,51 @@
+import "babel-polyfill"; //for async keyword etc..
 import express from "express";
-import React from "react";
-import { renderToString } from "react-dom/server";
-import Home from "./client/components/home";
+import renderer from "./helpers/renderer";
+import createServerStore from "./helpers/create-server-store";
+import { matchRoutes } from "react-router-config";
+import routes from "./client/routes";
+import proxy from "express-http-proxy";
 
 const app = express();
 
+app.use(
+  "/api",
+  proxy("http://react-ssr-api.herokuapp.com", {
+    proxyReqOptDecorator(opts) {
+      opts.headers["x-forwarded-host"] = "localhost:3000";
+      return opts;
+    },
+  })
+);
 app.use(express.static("public"));
 
-app.get("/", (req, res) => {
-  const content = renderToString(<Home />); // JSX is compiled with Babel through Webpack
+app.get("*", (req, res) => {
+  const store = createServerStore(req);
 
-  const html = `
-  <html>
-  <head>
-  </head>
-  <body>
-     <div id="root">${content}</div>
-     <script src="bundle.js"></script>
-  </body>
-  </html>
-  `;
-  res.send(html);
+  const promises = matchRoutes(routes, req.path)
+    .map(({ route }) => {
+      return route.loadData ? route.loadData(store) : null;
+    })
+    .map((promise) => {
+      if (promise) {
+        return new Promise((resolve, reject) => {
+          promise.then(resolve).catch(resolve);
+        });
+      }
+    });
+
+  Promise.all(promises).then(() => {
+    const context = {};
+    const content = renderer(req, store, context);
+
+    if (context.url) {
+      return res.redirect(301, context.url);
+    }
+    if (context.notFound) {
+      res.status(404);
+    }
+    res.send(content);
+  });
 });
 
 app.listen(3000, () => {
